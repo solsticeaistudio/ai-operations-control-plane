@@ -1,0 +1,33 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    environment:
+      CLICKHOUSE_DB: aiops
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep Ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  control-plane:
+    build: .
+    environment:
+      AIOPS_STORAGE: clickhouse
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: aiops
+      ALLOW_STORAGE_FALLBACK: "false"
+      AIOPS_DEMO_MODE: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  clickhouse_data:

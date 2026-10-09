@@ -2,6 +2,14 @@
 
 **See where AI is being used, what it costs, and whether a cheaper or safer setup will work before you enforce it.**
 
+## Watch the demo
+
+[![Watch the one-minute Solstice AI Operations Control Plane demo](demo/ai-operations-preview.gif)](https://github.com/solsticeaistudio/ai-operations-control-plane/raw/refs/heads/main/demo/ai-operations-demo.mp4)
+
+**[▶ Watch the full 1-minute demo](https://github.com/solsticeaistudio/ai-operations-control-plane/raw/refs/heads/main/demo/ai-operations-demo.mp4)**
+
+---
+
 Companies are adopting AI faster than most IT and security teams can govern it. Different teams use different models, providers, copilots, and agents. Costs are scattered. Usage is hard to attribute. And once leadership asks, “Who is using AI, how are they using it, and what guardrails should we put around it?”, the answer is often incomplete.
 
 This project is a working prototype for that problem.

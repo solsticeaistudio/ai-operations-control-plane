@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from .config import settings
+from .config import settings, validate_settings
 from .models import AIEvent, GatewayRequest, GatewayResponse, PolicyCreate, BudgetCreate, ReplayCompareRequest, WorkflowCapture
 from .repository import create_repository
 from .economics import MidasEconomics
@@ -15,6 +15,9 @@ from .replay import DeltaReplayEngine
 from .analytics import AnalyticsService
 from .ledger import SpendLedger, ingest
 from .seed import seed_demo
+
+# Fail closed before any service is constructed when running in production.
+validate_settings(settings)
 
 repo=create_repository(settings)
 economics=MidasEconomics(settings.pricing_file)
@@ -29,7 +32,8 @@ static=Path(__file__).resolve().parent/"static"
 
 @app.middleware("http")
 async def optional_api_key_auth(request: Request, call_next):
-    # Local demo runs open by default. Set AIOPS_API_KEY to protect product APIs.
+    # Optional by default for local demos. AIOPS_ENV=production fail-closes this:
+    # validate_settings() refuses to start with an empty AIOPS_API_KEY.
     if settings.api_key and request.url.path.startswith("/v1/"):
         supplied=request.headers.get("x-aiops-key","")
         if supplied != settings.api_key:

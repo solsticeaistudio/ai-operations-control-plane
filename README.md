@@ -340,6 +340,38 @@ For quick laptop development, set the backend to SQLite instead.
 
 ---
 
+## Production / customer deployment (fail-closed)
+
+The local defaults are deliberately convenient and deliberately **insecure**:
+
+| Default | Value | Risk in production |
+|---|---|---|
+| `AIOPS_API_KEY` | empty | the `/v1` product API is open (no auth) |
+| `AIOPS_DEMO_MODE` | `true` | demo seeding can inject fabricated data |
+| `ALLOW_STORAGE_FALLBACK` | `true` | ClickHouse failures silently fall back to local SQLite |
+
+To make a customer deployment safe, set `AIOPS_ENV=production`. The app then
+**refuses to start** unless `AIOPS_API_KEY` is set, `AIOPS_DEMO_MODE=false`, and
+`ALLOW_STORAGE_FALLBACK=false`. The process fails closed with a message naming
+every problem, rather than starting in an unsafe state.
+
+Copy `.env.production.example` and fill it in. Minimal safe configuration:
+
+```bash
+AIOPS_ENV=production
+AIOPS_API_KEY=<long-random-secret>   # clients send X-AIOps-Key
+AIOPS_DEMO_MODE=false
+ALLOW_STORAGE_FALLBACK=false
+AIOPS_STORAGE=sqlite
+AIOPS_SQLITE_PATH=/var/lib/aiops/aiops.db
+```
+
+This is a startup guardrail, not a complete security program. See
+[SECURITY.md](SECURITY.md) for the remaining production requirements (identity
+gateway, secret management, TLS termination, and so on).
+
+---
+
 ## Instrument an existing application
 
 You do not have to proxy all AI traffic through the gateway.

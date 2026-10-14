@@ -239,19 +239,40 @@ class SpendLedger:
             previous = expected
             checked += 1
 
-        if not problems and meta:
-            if int(meta.get("count", -1)) != len(entries):
+        # Head-record consistency. The stored head (count + head_seq + head_hash)
+        # is what makes truncation, tail deletion and "drop the head" attacks
+        # detectable, so a non-empty ledger with no head record is a failure, not
+        # a pass. Deleting the head row must never silently verify.
+        if not problems:
+            last_seq = entries[-1]["seq"] if entries else None
+            if entries and not meta:
                 problems.append({
-                    "reason": "record count mismatch (entries deleted or truncated)",
+                    "reason": "ledger head record is missing while entries exist "
+                              "(head deleted or never written)",
                     "entries": len(entries),
-                    "expected": meta.get("count"),
+                    "expected_seq": last_seq,
                 })
-            elif meta.get("head_hash") != previous:
-                problems.append({
-                    "reason": "head hash mismatch",
-                    "computed": previous,
-                    "expected": meta.get("head_hash"),
-                })
+            elif meta:
+                expected_count = int(meta.get("count", -1))
+                expected_seq = meta.get("head_seq")
+                if expected_count != len(entries):
+                    problems.append({
+                        "reason": "record count mismatch (entries deleted or truncated)",
+                        "entries": len(entries),
+                        "expected": meta.get("count"),
+                    })
+                elif expected_seq != last_seq:
+                    problems.append({
+                        "reason": "head_seq mismatch (head record does not match the last entry)",
+                        "head_seq": expected_seq,
+                        "last_seq": last_seq,
+                    })
+                elif meta.get("head_hash") != previous:
+                    problems.append({
+                        "reason": "head hash mismatch",
+                        "computed": previous,
+                        "expected": meta.get("head_hash"),
+                    })
 
         return {
             "ok": not problems,

@@ -110,6 +110,54 @@ def test_tail_deletion_detected():
     assert L.verify()["ok"] is False
 
 
+def test_missing_head_record_with_entries_detected():
+    # Deleting the head record must not make a non-empty ledger verify.
+    repo = _repo()
+    L = SpendLedger(repo)
+    for i in range(4):
+        L.record_event(_event(i), source="test")
+    assert L.verify()["ok"] is True
+    repo.conn.execute("DELETE FROM spend_ledger_meta")
+    repo.conn.commit()
+    v = L.verify()
+    assert v["ok"] is False
+    assert any("head record is missing" in p["reason"] for p in v["problems"])
+    assert v["meta"] is None
+
+
+def test_head_seq_tamper_detected():
+    # The head_seq must match the last entry's sequence number.
+    repo = _repo()
+    L = SpendLedger(repo)
+    for i in range(4):
+        L.record_event(_event(i), source="test")
+    repo.conn.execute("UPDATE spend_ledger_meta SET head_seq=head_seq+5 WHERE id=1")
+    repo.conn.commit()
+    v = L.verify()
+    assert v["ok"] is False
+    assert any("head_seq mismatch" in p["reason"] for p in v["problems"])
+
+
+def test_stale_head_seq_after_tail_repair_detected():
+    # An attacker who deletes the tail and repairs count+head_hash but forgets
+    # head_seq must still be caught by the head_seq check.
+    repo = _repo()
+    L = SpendLedger(repo)
+    for i in range(4):
+        L.record_event(_event(i), source="test")
+    rows = repo.ledger_entries_all()
+    new_last = rows[2]
+    repo.conn.execute("DELETE FROM spend_ledger WHERE seq=?", (rows[3]["seq"],))
+    repo.conn.execute(
+        "UPDATE spend_ledger_meta SET count=?, head_hash=? WHERE id=1",
+        (3, new_last["entry_hash"]),
+    )
+    repo.conn.commit()
+    v = L.verify()
+    assert v["ok"] is False
+    assert any("head_seq mismatch" in p["reason"] for p in v["problems"])
+
+
 def test_duplicate_events_idempotent():
     repo = _repo()
     L = SpendLedger(repo)

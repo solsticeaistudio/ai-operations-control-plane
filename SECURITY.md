@@ -12,6 +12,23 @@ This repository is a product prototype, so it deliberately separates what is imp
 - Central audit trail for gateway, replay and policy activity.
 - Model credentials remain in provider adapters/server-side configuration; model prompts do not receive provider keys.
 
+## Deployment defaults and fail-closed startup
+
+The shipped defaults are tuned for a local demo and are **unsafe for a customer
+deployment**:
+
+- `AIOPS_API_KEY` defaults to empty, leaving every `/v1` product endpoint open.
+- `AIOPS_DEMO_MODE` defaults to `true`, allowing demo seeding to write synthetic
+  telemetry and workflows.
+- `ALLOW_STORAGE_FALLBACK` defaults to `true`, so a failed ClickHouse connection
+  silently falls back to local SQLite.
+
+Set `AIOPS_ENV=production` to fail closed. The process then **refuses to start**
+unless `AIOPS_API_KEY` is set, `AIOPS_DEMO_MODE=false`, and
+`ALLOW_STORAGE_FALLBACK=false`; the error names every unmet requirement. Start
+from `.env.production.example`. This guardrail is a floor, not a substitute for
+the controls below (identity gateway, secret manager, TLS termination, RBAC).
+
 ## Production identity design
 
 Do **not** trust `user_id`, `team` or application identity supplied by arbitrary clients in production. Put the service behind the enterprise identity-aware gateway and derive identity from signed authentication context. Workload identity should be distinct from human identity. The event should carry both the initiating principal and executing workload.

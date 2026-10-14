@@ -48,7 +48,12 @@ the head record.
 - **Reordering / previous_hash tampering** — chain link mismatch.
 - **Deletion of any entry, including the last** — an interior gap breaks the
   `previous_hash` link; removing the tail (or truncating) is caught by the head
-  record's `count`/`head_hash`.
+  record's `count`/`head_seq`/`head_hash`.
+- **Head-record removal** — a ledger with entries but no head record fails
+  verification. Deleting the head row must never silently verify.
+- **Head-record tampering** — `head_seq` must equal the last entry's sequence
+  number and `head_hash` must equal the recomputed head. An attacker who deletes
+  the tail and repairs `count`/`head_hash` is still caught by `head_seq`.
 - **Duplicates** — a resubmitted event id does not create a second entry.
 
 ### What verification does NOT guarantee (stated plainly)
@@ -226,7 +231,8 @@ added (`ledger_protected`, `source`, `accepted`, `created`, `duplicates`).
 ## Test coverage
 
 `tests/test_ledger.py`: append/verify, previous-hash linkage, alteration,
-malicious middle/head/tail deletion, duplicate-event idempotency, concurrent
+malicious middle/head/tail deletion, missing head record, `head_seq` tampering
+(including a repaired tail deletion), duplicate-event idempotency, concurrent
 writes, concurrent duplicate writes, restart persistence and chain continuity,
 unsupported-backend behavior, ClickHouse non-claim, atomic ingest, rollback of
 both writes on ledger failure, first-write-wins drift prevention, reconciliation

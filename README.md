@@ -230,13 +230,50 @@ This repository is not a set of mock screenshots. The following pieces are imple
 | Replay experiments | Working |
 | Cost/quality comparison | Working |
 | Audit trail | Working |
+| Spend ledger (hash-chained, idempotent) | Working on SQLite; not supported on ClickHouse |
 | Python SDK | Working |
 | Browser dashboard | Working |
 | OpenAI-compatible provider adapter | Implemented |
 | Production SSO / enterprise identity | Not yet integrated |
 | Production-grade evaluation suite | Not yet implemented |
 
-The project currently has **7 passing tests** covering API behavior, policy evaluation, replay, and economics.
+The project currently has **43 passing tests** covering API behavior, policy evaluation, replay, economics, the spend ledger, demo-data scoping, and the Python SDK.
+
+### Spend ledger
+
+Ingest paths append spend facts to a hash-chained, append-only ledger with
+event identity, source provenance and pricing version, written **atomically with
+the event row** so the analytics table and the ledger cannot disagree after a
+successful call. Events are first-write-wins on `event_id`, so a resubmitted
+event cannot silently change a recorded cost. `GET /v1/ledger/verify` re-walks
+the chain and checks the stored head, detecting alteration, deletion and
+truncation; duplicate events are deduplicated by event id.
+`GET /v1/ledger/reconcile` reports fact-table vs ledger agreement (missing
+ledger entries, cost mismatches, and expected ledger-only history).
+
+Scope and limits, stated plainly: this is **not** claimed to be billing-grade.
+The ledger records spend facts *as submitted* — it does not establish that the
+caller's identity, token counts or costs are true, and a full rewrite of the
+SQLite file (including the stored head) is not detectable without anchoring the
+head hash externally. It is currently implemented on **SQLite only**; the
+ClickHouse path is designed but not implemented, and on ClickHouse ingest
+results are reported with `ledger_protected: false` rather than silently
+claiming protection. See
+[`docs/LEDGER_DESIGN.md`](docs/LEDGER_DESIGN.md) for the integrity model, the
+concurrency approach, and the trust boundaries.
+
+### Demo data is isolated and opt-in
+
+`POST /v1/demo/seed` is disabled unless `AIOPS_DEMO_MODE=true` (it returns `403`
+otherwise), so destructive demo operations cannot run by accident in a real
+deployment. When seeding with `clear=true`, the reset deletes **only** records
+the seeder itself created (tracked in a `demo_records` registry) — real
+telemetry, policies and budgets are never touched, and neither is the spend
+ledger. Backends that cannot scope deletes to demo rows (ClickHouse) refuse to
+clear rather than truncate. Note that a demo reset still leaves the seeded
+events' ledger entries in place, which is intentional: the ledger is
+append-only, and retained entries show up as `ledger_only_history` in
+`/v1/ledger/reconcile`.
 
 ---
 
@@ -405,6 +442,12 @@ GET  /v1/budgets
 POST /v1/budgets
 
 GET  /v1/audit
+
+GET  /v1/ledger
+GET  /v1/ledger/{entry_id}
+GET  /v1/ledger/head
+GET  /v1/ledger/verify
+GET  /v1/ledger/reconcile
 ```
 
 See `/docs` for the full interactive OpenAPI surface.

@@ -13,6 +13,7 @@ from .providers import ProviderRegistry
 from .policy import PolicyEngine
 from .replay import DeltaReplayEngine
 from .analytics import AnalyticsService
+from .ledger import SpendLedger, ingest
 from .seed import seed_demo
 
 repo=create_repository(settings)
@@ -21,6 +22,7 @@ providers=ProviderRegistry(settings.openai_compat_base_url,settings.openai_compa
 policy_engine=PolicyEngine(repo,economics)
 replay_engine=DeltaReplayEngine(repo,providers,economics)
 analytics=AnalyticsService(repo,economics)
+ledger=SpendLedger(repo)
 
 app=FastAPI(title="Solstice AI Operations Control Plane",version="0.1.0",description="Telemetry, model economics, replay experiments and guardrails for enterprise AI.")
 static=Path(__file__).resolve().parent/"static"
@@ -40,24 +42,29 @@ app.mount("/static",StaticFiles(directory=static),name="static")
 def index(): return FileResponse(static/"index.html")
 
 @app.get("/health")
-def health(): return {"ok":True,"backend":repo.backend,"version":app.version,"pricing_version":economics.version,"providers":list(providers.providers)}
+def health(): return {"ok":True,"backend":repo.backend,"version":app.version,"pricing_version":economics.version,"providers":list(providers.providers),"ledger":{"backend":repo.backend,"supported":ledger.supported}}
 
 @app.post("/v1/demo/seed")
-def demo_seed(clear: bool=True): return seed_demo(repo,economics,clear=clear)
+def demo_seed(clear: bool=True):
+    # Destructive demo operations are disabled unless demo mode is explicitly on.
+    if not settings.demo_mode: raise HTTPException(403,"Demo operations are disabled (set AIOPS_DEMO_MODE=true to enable)")
+    return seed_demo(repo,economics,ledger,clear=clear)
 
 @app.post("/v1/events")
-def ingest(event: AIEvent):
+def ingest_event(event: AIEvent):
     if not event.estimated_cost_usd: event.estimated_cost_usd=economics.estimate_cost(event.model,event.input_tokens,event.output_tokens,event.cached_tokens)
-    repo.insert_event(event.model_dump()); return {"ok":True,"event_id":event.event_id,"estimated_cost_usd":event.estimated_cost_usd}
+    rec=ingest(ledger,[event.model_dump()],source="api:/v1/events",pricing_version=economics.version)
+    return {"ok":True,"event_id":event.event_id,"estimated_cost_usd":event.estimated_cost_usd,"ledger":rec}
 
 @app.post("/v1/events/batch")
 def ingest_batch(events: list[AIEvent]):
     if len(events)>5000: raise HTTPException(413,"Batch limit is 5,000 events")
-    ids=[]
+    payloads=[]
     for event in events:
         if not event.estimated_cost_usd: event.estimated_cost_usd=economics.estimate_cost(event.model,event.input_tokens,event.output_tokens,event.cached_tokens)
-        repo.insert_event(event.model_dump()); ids.append(event.event_id)
-    return {"ok":True,"accepted":len(ids),"event_ids":ids}
+        payloads.append(event.model_dump())
+    rec=ingest(ledger,payloads,source="api:/v1/events/batch",pricing_version=economics.version)
+    return {"ok":True,"accepted":len(events),"event_ids":[e.event_id for e in events],"ledger":rec}
 
 @app.post("/v1/gateway/generate",response_model=GatewayResponse)
 def generate(req: GatewayRequest):
@@ -76,7 +83,7 @@ def generate(req: GatewayRequest):
     quality=None; task_success=None
     if expected: quality,task_success=replay_engine.quality_score(result.output,result.output,expected)
     event=AIEvent(user_id=req.user_id,team=req.team,application=req.application,workflow=req.workflow,agent=req.agent,provider=req.provider,model=selected,input_tokens=result.input_tokens,output_tokens=result.output_tokens,cached_tokens=result.cached_tokens,latency_ms=result.latency_ms,estimated_cost_usd=cost,success=result.success,error_code=result.error_code,tool_calls=req.tool_calls,retry_count=req.retry_count,data_classification=req.data_classification,policy_decision=p["decision"],policy_reasons=p["reasons"],task_success=task_success,quality_score=quality,metadata=req.metadata)
-    repo.insert_event(event.model_dump())
+    ingest(ledger,[event.model_dump()],source="gateway:/v1/gateway/generate",pricing_version=economics.version)
     capture_id=None
     if req.capture_for_replay:
         expected_obj=req.metadata.get("expected") or {}
@@ -126,3 +133,26 @@ def budgets():
     return out
 @app.get("/v1/audit")
 def audit(limit:int=100): return repo.audits(limit)
+
+@app.get("/v1/ledger")
+def ledger_entries(limit:int=Query(100,ge=1,le=5000)):
+    if not ledger.supported: raise HTTPException(501,"Spend ledger is not supported by this storage backend; see docs/LEDGER_DESIGN.md")
+    return {"backend":repo.backend,"count":ledger.count(),"entries":ledger.entries(limit)}
+@app.get("/v1/ledger/verify")
+def ledger_verify():
+    if not ledger.supported: raise HTTPException(501,"Spend ledger is not supported by this storage backend; see docs/LEDGER_DESIGN.md")
+    return ledger.verify()
+@app.get("/v1/ledger/head")
+def ledger_head():
+    if not ledger.supported: raise HTTPException(501,"Spend ledger is not supported by this storage backend; see docs/LEDGER_DESIGN.md")
+    return {"backend":repo.backend,"count":ledger.count(),"meta":ledger.head()}
+@app.get("/v1/ledger/reconcile")
+def ledger_reconcile():
+    if not ledger.supported: raise HTTPException(501,"Spend ledger is not supported by this storage backend; see docs/LEDGER_DESIGN.md")
+    return ledger.reconcile()
+@app.get("/v1/ledger/{entry_id}")
+def ledger_entry(entry_id:str):
+    if not ledger.supported: raise HTTPException(501,"Spend ledger is not supported by this storage backend; see docs/LEDGER_DESIGN.md")
+    entry=ledger.get(entry_id)
+    if not entry: raise HTTPException(404,"Ledger entry not found")
+    return entry

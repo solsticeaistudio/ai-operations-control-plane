@@ -360,6 +360,10 @@ def replays(request: Request, limit: int = 100):
 @app.post("/v1/policies")
 def create_policy(p: PolicyCreate, request: Request):
     s = services_for(request, "aiops:admin")
+    if settings.secure_mode and p.scope.get("workflows"):
+        # Workflow labels are client asserted today. Do not use them as
+        # security-sensitive authorization scopes until their provenance is verified.
+        raise HTTPException(400, "Workflow-scoped policies require trusted workflow identity")
     pid = s.repo.upsert_policy(p.model_dump())
     s.repo.audit("policy", authenticated_actor(request), pid, "upsert", {
         "name": p.name, "mode": p.mode, "priority": p.priority, "enabled": p.enabled,
@@ -375,6 +379,8 @@ def policies(request: Request):
 @app.post("/v1/budgets")
 def create_budget(b: BudgetCreate, request: Request):
     s = services_for(request, "aiops:admin")
+    if settings.secure_mode and b.scope_type == "workflow":
+        raise HTTPException(400, "Workflow budgets require trusted workflow identity")
     bid = s.repo.upsert_budget(b.model_dump())
     s.repo.audit("budget", authenticated_actor(request), bid, "upsert", {
         "scope_type": b.scope_type, "scope_value": b.scope_value,

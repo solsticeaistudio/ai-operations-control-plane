@@ -236,7 +236,7 @@ This repository is not a set of mock screenshots. The following pieces are imple
 | Production SSO / enterprise identity | Not yet integrated |
 | Production-grade evaluation suite | Not yet implemented |
 
-The project currently has **7 passing tests** covering API behavior, policy evaluation, replay, and economics.
+Automated tests cover API behavior, policy evaluation, replay, economics, and audit-data redaction. See the GitHub Actions test workflow for the current test result.
 
 ---
 
@@ -476,6 +476,8 @@ Additional documentation:
 - [`SECURITY.md`](SECURITY.md)
 - [`PRODUCTION_ROADMAP.md`](PRODUCTION_ROADMAP.md)
 - [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md)
+- [`THREAT_MODEL.md`](THREAT_MODEL.md)
+- [`INTERVIEW_WALKTHROUGH.md`](INTERVIEW_WALKTHROUGH.md)
 
 ---
 

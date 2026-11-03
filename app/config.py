@@ -14,6 +14,10 @@ class Settings:
     allow_storage_fallback: bool = os.getenv("ALLOW_STORAGE_FALLBACK", "true").lower() == "true"
     demo_mode: bool = os.getenv("AIOPS_DEMO_MODE", "true").lower() == "true"
     api_key: str = os.getenv("AIOPS_API_KEY", "")
+    secure_mode: bool = os.getenv("AIOPS_SECURE_MODE", "false").lower() == "true"
+    oidc_issuer: str = os.getenv("AIOPS_OIDC_ISSUER", "")
+    oidc_audience: str = os.getenv("AIOPS_OIDC_AUDIENCE", "")
+    oidc_jwks_url: str = os.getenv("AIOPS_OIDC_JWKS_URL", "")
     pricing_file: str = os.getenv("AIOPS_PRICING_FILE", str(Path(__file__).resolve().parents[1] / "config" / "pricing.json"))
     openai_compat_base_url: str = os.getenv("OPENAI_COMPAT_BASE_URL", "")
     openai_compat_api_key: str = os.getenv("OPENAI_COMPAT_API_KEY", "")

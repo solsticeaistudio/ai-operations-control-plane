@@ -123,6 +123,8 @@ def create_repository(settings, tenant_id: str | None = None):
     suffix = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()[:24] if tenant_id else None
 
     if settings.storage == "clickhouse":
+        if settings.secure_mode and not settings.clickhouse_url.startswith("https://"):
+            raise RuntimeError("Secure mode requires TLS to ClickHouse")
         db = settings.clickhouse_database
         if suffix:
             db = f"{db}_t_{suffix}"

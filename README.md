@@ -235,6 +235,8 @@ This repository is not a set of mock screenshots. The following pieces are imple
 | OpenAI-compatible provider adapter | Implemented |
 | OIDC JWT verification with scoped API routes | Implemented (opt-in secure mode) |
 | Tenant-specific SQLite/ClickHouse repositories | Implemented (prototype secure mode) |
+| Bounded request sizes, rate limits and audit sanitization | Implemented (opt-in secure mode) |
+| Docker local-demo loopback ports and non-root runtime | Implemented |
 | Production customer federation / IdP onboarding | Not yet integrated |
 | Production-grade evaluation suite | Not yet implemented |
 
@@ -258,7 +260,9 @@ and only permits explicitly allowed model providers (mock by default). It is
 must supply a trusted broker that securely maps users/workloads to tenants,
 and enforce DB-level permissions, retention, quotas and lifecycle controls.
 
-See [IDENTITY_HARDENING.md](IDENTITY_HARDENING.md) for required environment
+See [API_SECURITY_HARDENING.md](API_SECURITY_HARDENING.md) for M3 request limits,
+audit and Docker protections, and
+[IDENTITY_HARDENING.md](IDENTITY_HARDENING.md) for required environment
 settings, API scopes, tests, and limitations. The static dashboard still lacks
 an OIDC login UI, so secured mode is primarily for API clients.
 
@@ -465,7 +469,7 @@ A few important limits:
 
 - The included model pricing is example/default pricing. Production use should load actual negotiated provider pricing.
 - The local replay evaluator is intentionally lightweight. Real deployment should use task-specific evaluators, historical labels, and human review where appropriate.
-- Identity is currently supplied as telemetry metadata. Production use should integrate an enterprise identity provider or trusted gateway so identity cannot be self-asserted.
+- Local demo mode still trusts client-provided attribution. Opt-in secure mode verifies signed broker claims and partitions tenant stores, but full enterprise federation and source-attested telemetry are not integrated.
 - The policy engine is intentionally small. A production rollout would need centralized administration, approvals, policy versioning, stronger authorization, and richer data classification.
 - The portable replay layer stores complete workflow captures. The architecture is designed so Solstice DeltaStore can replace it with parent-relative lineage and richer historical reconstruction.
 
@@ -500,6 +504,7 @@ Additional documentation:
 - [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md)
 - [`THREAT_MODEL.md`](THREAT_MODEL.md)
 - [`IDENTITY_HARDENING.md`](IDENTITY_HARDENING.md)
+- [`API_SECURITY_HARDENING.md`](API_SECURITY_HARDENING.md)
 
 ---
 

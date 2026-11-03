@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from threading import Lock
 from datetime import datetime, timezone
 import secrets
+import hashlib
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, FileResponse
@@ -21,6 +22,7 @@ from .policy import PolicyEngine
 from .replay import DeltaReplayEngine
 from .analytics import AnalyticsService
 from .security import OIDCVerifier, Principal
+from .limits import FixedWindowLimiter, BodySizeLimitMiddleware
 from .seed import seed_demo
 
 
@@ -52,6 +54,27 @@ class Services:
 _tenant_services: dict[str, Services] = {}
 _tenant_lock = Lock()
 _MAX_TENANTS_PER_PROCESS = 128
+if settings.secure_mode and (settings.secure_rate_per_minute <= 0 or
+                             settings.secure_ip_rate_per_minute <= 0 or
+                             not 1024 <= settings.secure_body_max_bytes <= 2_097_152):
+    raise RuntimeError("Invalid secure API rate/body limits")
+
+_ip_limiter = FixedWindowLimiter(max(1, settings.secure_ip_rate_per_minute))
+_principal_limiter = FixedWindowLimiter(max(1, settings.secure_rate_per_minute))
+
+
+def _limited_response(retry_after: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=429, content={"detail": "Rate limit exceeded"},
+        headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"},
+    )
+
+
+def _audit_subject(value: str) -> str:
+    if settings.secure_mode:
+        return "wf_" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return value
+
 
 
 def services_for(request: Request, required_scope: str = "aiops:read") -> Services:
@@ -110,16 +133,35 @@ def trusted_event(event: AIEvent, request: Request) -> AIEvent:
 
 app = FastAPI(
     title="Solstice AI Operations Control Plane",
-    version="0.2.0",
+    version="0.3.0",
     description="Telemetry, model economics, replay experiments and guardrails for enterprise AI.",
+)
+# Outer ASGI guard limits streaming request bodies before FastAPI buffers JSON.
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=settings.secure_body_max_bytes,
+    secure_mode=lambda: settings.secure_mode,
 )
 static = Path(__file__).resolve().parent / "static"
 
 
 @app.middleware("http")
 async def authenticate_product_api(request: Request, call_next):
-    if request.url.path.startswith("/v1/"):
+    path = request.url.path
+    if settings.secure_mode and (
+        path in {"/", "/docs", "/redoc", "/openapi.json"} or path.startswith("/static/")
+    ):
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+    if path.startswith("/v1/"):
         if settings.secure_mode:
+            # Do not use untrusted X-Forwarded-For. Behind a proxy these limits
+            # are per proxy/client socket; production ingress still needs shared
+            # rate limiting and authenticated identity propagation.
+            source = request.client.host if request.client else "unknown"
+            retry = _ip_limiter.check(source)
+            if retry:
+                return _limited_response(retry)
             if verifier is None:
                 return JSONResponse(status_code=503, content={"detail": "Authentication not configured"})
             try:
@@ -128,15 +170,27 @@ async def authenticate_product_api(request: Request, call_next):
                 return JSONResponse(
                     status_code=exc.status_code,
                     content={"detail": exc.detail},
-                    headers={"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else {},
+                    headers={
+                        "WWW-Authenticate": "Bearer",
+                        "Cache-Control": "no-store",
+                    } if exc.status_code == 401 else {"Cache-Control": "no-store"},
                 )
+            principal: Principal = request.state.principal
+            retry = _principal_limiter.check(f"{principal.tenant_id}:{principal.subject}")
+            if retry:
+                return _limited_response(retry)
         elif settings.api_key:
             supplied = request.headers.get("x-aiops-key", "")
             if not secrets.compare_digest(supplied, settings.api_key):
                 return JSONResponse(
                     status_code=401, content={"detail": "Missing or invalid X-AIOps-Key"}
                 )
-    return await call_next(request)
+    response = await call_next(request)
+    if settings.secure_mode:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+    return response
 
 
 app.mount("/static", StaticFiles(directory=static), name="static")
@@ -149,6 +203,8 @@ def index():
 
 @app.get("/health")
 def health():
+    if settings.secure_mode:
+        return {"ok": True}
     return {
         "ok": True,
         "backend": settings.storage if repo is None else repo.backend,
@@ -224,12 +280,14 @@ def generate(req: GatewayRequest, request: Request):
     ctx = req.model_dump() | {"estimated_input_tokens": estimated_input}
     p = s.policy_engine.evaluate(ctx)
     if p["decision"] == "deny":
-        s.repo.audit("policy", authenticated_actor(request), req.workflow, "deny", {
-            "reasons": p["reasons"],
-            "provider": req.provider,
-            "model": req.model,
-            "data_classification": req.data_classification,
-        })
+        detail = (
+            {"reason_count": len(p["reasons"]), "provider": req.provider}
+            if settings.secure_mode else
+            {"reasons": p["reasons"], "provider": req.provider,
+             "model": req.model, "data_classification": req.data_classification}
+        )
+        s.repo.audit("policy", authenticated_actor(request),
+                     _audit_subject(req.workflow), "deny", detail)
         raise HTTPException(403, {
             "message": "Request denied by policy",
             "reasons": p["reasons"],
@@ -282,10 +340,16 @@ def generate(req: GatewayRequest, request: Request):
         )
         s.repo.insert_workflow(wf.model_dump())
         capture_id = wf.workflow_id
-    s.repo.audit("gateway", authenticated_actor(request), req.workflow, "allow", {
-        "model_requested": req.model, "model_used": selected,
-        "cost_usd": cost, "shadow_actions": p["shadow_actions"],
-    })
+    audit_details = (
+        {"provider": req.provider, "cost_usd": cost,
+         "route_changed": selected != req.model,
+         "shadow_action_count": len(p["shadow_actions"])}
+        if settings.secure_mode else
+        {"model_requested": req.model, "model_used": selected,
+         "cost_usd": cost, "shadow_actions": p["shadow_actions"]}
+    )
+    s.repo.audit("gateway", authenticated_actor(request),
+                 _audit_subject(req.workflow), "allow", audit_details)
     return GatewayResponse(
         request_id=event.request_id, trace_id=event.trace_id,
         provider=req.provider, model=selected, output=result.output,
@@ -303,23 +367,26 @@ def overview(request: Request, hours: int = Query(24, ge=1, le=24*365)):
 
 
 @app.get("/v1/analytics/breakdown")
-def breakdown(request: Request, group_by: str = "team", hours: int = 24, limit: int = 20):
+def breakdown(request: Request, group_by: str = "team",
+              hours: int = Query(24, ge=1, le=24*365),
+              limit: int = Query(20, ge=1, le=100)):
     return services_for(request).analytics.group(group_by, hours, limit)
 
 
 @app.get("/v1/events")
-def list_events(request: Request, hours: int = 24, limit: int = 100):
+def list_events(request: Request, hours: int = Query(24, ge=1, le=24*365),
+                limit: int = Query(100, ge=1, le=500)):
     return services_for(request).repo.events(hours, limit)
 
 
 @app.get("/v1/recommendations")
-def recommendations(request: Request, hours: int = 24):
+def recommendations(request: Request, hours: int = Query(24, ge=1, le=24*365)):
     s = services_for(request)
     return economics.recommendations(s.repo.events(hours, 5000), s.repo.replay_runs())
 
 
 @app.get("/v1/workflows")
-def workflows(request: Request, limit: int = 100):
+def workflows(request: Request, limit: int = Query(100, ge=1, le=200)):
     return services_for(request, "aiops:replay").repo.list_workflows(limit)
 
 
@@ -353,7 +420,7 @@ def replay(workflow_id: str, req: ReplayCompareRequest, request: Request):
 
 
 @app.get("/v1/replays")
-def replays(request: Request, limit: int = 100):
+def replays(request: Request, limit: int = Query(100, ge=1, le=200)):
     return services_for(request, "aiops:replay").repo.replay_runs(limit)
 
 
@@ -365,9 +432,11 @@ def create_policy(p: PolicyCreate, request: Request):
         # security-sensitive authorization scopes until their provenance is verified.
         raise HTTPException(400, "Workflow-scoped policies require trusted workflow identity")
     pid = s.repo.upsert_policy(p.model_dump())
-    s.repo.audit("policy", authenticated_actor(request), pid, "upsert", {
-        "name": p.name, "mode": p.mode, "priority": p.priority, "enabled": p.enabled,
-    })
+    s.repo.audit("policy", authenticated_actor(request), pid, "upsert", (
+        {"mode": p.mode, "priority": p.priority, "enabled": p.enabled}
+        if settings.secure_mode else
+        {"name": p.name, "mode": p.mode, "priority": p.priority, "enabled": p.enabled}
+    ))
     return {"ok": True, "policy_id": pid}
 
 
@@ -382,10 +451,12 @@ def create_budget(b: BudgetCreate, request: Request):
     if settings.secure_mode and b.scope_type == "workflow":
         raise HTTPException(400, "Workflow budgets require trusted workflow identity")
     bid = s.repo.upsert_budget(b.model_dump())
-    s.repo.audit("budget", authenticated_actor(request), bid, "upsert", {
-        "scope_type": b.scope_type, "scope_value": b.scope_value,
-        "monthly_limit_usd": b.monthly_limit_usd,
-    })
+    s.repo.audit("budget", authenticated_actor(request), bid, "upsert", (
+        {"scope_type": b.scope_type, "monthly_limit_usd": b.monthly_limit_usd}
+        if settings.secure_mode else
+        {"scope_type": b.scope_type, "scope_value": b.scope_value,
+         "monthly_limit_usd": b.monthly_limit_usd}
+    ))
     return {"ok": True, "budget_id": bid}
 
 
@@ -403,5 +474,5 @@ def budgets(request: Request):
 
 
 @app.get("/v1/audit")
-def audit(request: Request, limit: int = 100):
+def audit(request: Request, limit: int = Query(100, ge=1, le=500)):
     return services_for(request, "aiops:audit").repo.audits(limit)

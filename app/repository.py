@@ -48,12 +48,25 @@ class SQLiteRepository(Repository):
         bid=b.get("budget_id") or f"bud_{uuid.uuid4().hex[:12]}"; now=self.now_iso(); self.conn.execute("INSERT OR REPLACE INTO budgets VALUES (?,?,?,?,?,?,?,?,?)",(bid,b["scope_type"],b["scope_value"],b["monthly_limit_usd"],b.get("warning_threshold",.8),int(b.get("hard_limit",False)),b.get("overage_action","warn"),b.get("created_at",now),now)); self.conn.commit(); return bid
     def list_budgets(self): return [{**dict(r),"hard_limit":bool(r["hard_limit"])} for r in self.conn.execute("SELECT * FROM budgets ORDER BY scope_type,scope_value").fetchall()]
     def monthly_spend(self,scope_type,scope_value):
-        field={"team":"team","application":"application","workflow":"workflow"}[scope_type]; cutoff=(datetime.now(timezone.utc)-timedelta(days=30)).isoformat(); return float(self.conn.execute(f"SELECT COALESCE(SUM(estimated_cost_usd),0) FROM ai_events WHERE {field}=? AND timestamp>=?",(scope_value,cutoff)).fetchone()[0] or 0)
+        # SQL identifiers come from fixed literals, never request-controlled text.
+        query = {
+            "team": "SELECT COALESCE(SUM(estimated_cost_usd),0) FROM ai_events WHERE team=? AND timestamp>=?",
+            "application": "SELECT COALESCE(SUM(estimated_cost_usd),0) FROM ai_events WHERE application=? AND timestamp>=?",
+            "workflow": "SELECT COALESCE(SUM(estimated_cost_usd),0) FROM ai_events WHERE workflow=? AND timestamp>=?",
+        }[scope_type]
+        cutoff=(datetime.now(timezone.utc)-timedelta(days=30)).isoformat()
+        return float(self.conn.execute(query,(scope_value,cutoff)).fetchone()[0] or 0)
     def audit(self,kind,actor,subject,decision,details):
         self.conn.execute("INSERT INTO audit VALUES (?,?,?,?,?,?,?)",(f"aud_{uuid.uuid4().hex[:12]}",self.now_iso(),kind,actor,subject,decision,json.dumps(details))); self.conn.commit()
     def audits(self,limit=100): return [{**dict(r),"details":json.loads(r["details_json"] or "{}")} for r in self.conn.execute("SELECT * FROM audit ORDER BY timestamp DESC LIMIT ?",(limit,)).fetchall()]
     def clear_demo(self):
-        for t in ("ai_events","workflows","replay_runs","policies","budgets","audit"): self.conn.execute(f"DELETE FROM {t}")
+        # Fixed statements avoid interpolating table identifiers.
+        for sql in (
+            "DELETE FROM ai_events", "DELETE FROM workflows",
+            "DELETE FROM replay_runs", "DELETE FROM policies",
+            "DELETE FROM budgets", "DELETE FROM audit",
+        ):
+            self.conn.execute(sql)
         self.conn.commit()
 
 class ClickHouseRepository(Repository):
@@ -65,13 +78,22 @@ class ClickHouseRepository(Repository):
         # Bootstrap the database through the default namespace before querying it.
         self.client.post(self.url,params={"query":f"CREATE DATABASE IF NOT EXISTS {self.database}"},auth=self.auth).raise_for_status()
         self.init_schema(); self._execute("SELECT 1")
-    def _execute(self,sql,params=None):
-        q=sql if params is None else sql.format(**{k:self._quote(v) for k,v in params.items()}); r=self.client.post(self.url,params={"database":self.database if not sql.startswith("CREATE DATABASE") else "default"},content=q.encode(),auth=self.auth); r.raise_for_status(); return r.text
-    def _quote(self,v): return "'"+str(v).replace("\\","\\\\").replace("'","\\'")+"'"
+    def _execute(self,sql):
+        # DDL uses fixed identifiers validated in __init__; no request values.
+        r=self.client.post(self.url,params={"database":self.database if not sql.startswith("CREATE DATABASE") else "default"},content=sql.encode(),auth=self.auth); r.raise_for_status(); return r.text
     def _insert_json(self,table,row):
         r=self.client.post(self.url,params={"database":self.database,"date_time_input_format":"best_effort","query":f"INSERT INTO {table} FORMAT JSONEachRow"},content=(json.dumps(row,default=str)+"\n").encode(),auth=self.auth); r.raise_for_status()
-    def _query_json(self,sql):
-        r=self.client.post(self.url,params={"database":self.database,"query":sql+" FORMAT JSONEachRow"},auth=self.auth); r.raise_for_status(); return [json.loads(x) for x in r.text.splitlines() if x.strip()]
+    def _query_json(self,sql,query_params=None):
+        # ClickHouse typed placeholders: {value:String}, {limit:UInt32}, etc.
+        # Parameter values travel separately as HTTP param_* entries.
+        params={"database":self.database,"query":sql+" FORMAT JSONEachRow"}
+        for key,value in (query_params or {}).items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]*",key):
+                raise ValueError("Invalid ClickHouse query parameter name")
+            params[f"param_{key}"]=value
+        r=self.client.post(self.url,params=params,auth=self.auth)
+        r.raise_for_status()
+        return [json.loads(x) for x in r.text.splitlines() if x.strip()]
     def init_schema(self):
         self.client.post(self.url,params={"query":f"CREATE DATABASE IF NOT EXISTS {self.database}"},auth=self.auth).raise_for_status()
         stmts=[
@@ -85,18 +107,33 @@ class ClickHouseRepository(Repository):
     def insert_event(self,e):
         d=dict(e); d["timestamp"]=d["timestamp"].isoformat() if hasattr(d["timestamp"],"isoformat") else str(d["timestamp"]); d["policy_reasons_json"]=json.dumps(d.pop("policy_reasons",[])); d["metadata_json"]=json.dumps(d.pop("metadata",{})); d["success"]=int(bool(d["success"])); d["task_success"]=None if d.get("task_success") is None else int(bool(d["task_success"])); self._insert_json("ai_events",d)
     def events(self,hours=24,limit=5000):
-        rows=self._query_json(f"SELECT * FROM ai_events WHERE timestamp >= now() - INTERVAL {int(hours)} HOUR ORDER BY timestamp DESC LIMIT {int(limit)}");
+        rows=self._query_json(
+            "SELECT * FROM ai_events WHERE timestamp >= now() - INTERVAL {hours:UInt32} HOUR ORDER BY timestamp DESC LIMIT {limit:UInt32}",
+            {"hours":int(hours),"limit":int(limit)},
+        );
         for d in rows: d["policy_reasons"]=json.loads(d.pop("policy_reasons_json") or "[]"); d["metadata"]=json.loads(d.pop("metadata_json") or "{}"); d["success"]=bool(d["success"]); d["task_success"]=None if d.get("task_success") is None else bool(d["task_success"])
         return rows
     def insert_workflow(self,w):
         d=dict(w); d["captured_at"]=d["captured_at"].isoformat() if hasattr(d["captured_at"],"isoformat") else str(d["captured_at"]); d["expected_json"]=json.dumps(d.pop("expected",{})); d["tool_trace_json"]=json.dumps(d.pop("tool_trace",[])); d["metadata_json"]=json.dumps(d.pop("metadata",{})); self._insert_json("workflows",d)
     def list_workflows(self,limit=100):
-        rows=self._query_json(f"SELECT * FROM workflows FINAL ORDER BY captured_at DESC LIMIT {int(limit)}"); return [self._workflow_row(d) for d in rows]
+        rows=self._query_json(
+            "SELECT * FROM workflows FINAL ORDER BY captured_at DESC LIMIT {limit:UInt32}",
+            {"limit":int(limit)},
+        ); return [self._workflow_row(d) for d in rows]
     def get_workflow(self,wid):
-        rows=self._query_json(f"SELECT * FROM workflows FINAL WHERE workflow_id={self._quote(wid)} ORDER BY captured_at DESC LIMIT 1"); return self._workflow_row(rows[0]) if rows else None
+        rows=self._query_json(
+            "SELECT * FROM workflows FINAL WHERE workflow_id={workflow_id:String} ORDER BY captured_at DESC LIMIT 1",
+            {"workflow_id":wid},
+        ); return self._workflow_row(rows[0]) if rows else None
     def _workflow_row(self,d): d=dict(d); d["expected"]=json.loads(d.pop("expected_json") or "{}"); d["tool_trace"]=json.loads(d.pop("tool_trace_json") or "[]"); d["metadata"]=json.loads(d.pop("metadata_json") or "{}"); return d
     def insert_replay(self,r): d=dict(r); d["task_success"]=int(bool(d["task_success"])); self._insert_json("replay_runs",d)
-    def replay_runs(self,limit=1000): return [{**r,"task_success":bool(r["task_success"])} for r in self._query_json(f"SELECT * FROM replay_runs ORDER BY created_at DESC LIMIT {int(limit)}")]
+    def replay_runs(self,limit=1000): return [
+        {**r,"task_success":bool(r["task_success"])}
+        for r in self._query_json(
+            "SELECT * FROM replay_runs ORDER BY created_at DESC LIMIT {limit:UInt32}",
+            {"limit":int(limit)},
+        )
+    ]
     def upsert_policy(self,p):
         pid=p.get("policy_id") or f"pol_{uuid.uuid4().hex[:12]}"; now=self.now_iso(); self._insert_json("policies",{"policy_id":pid,"name":p["name"],"mode":p["mode"],"priority":p.get("priority",100),"enabled":int(p.get("enabled",True)),"scope_json":json.dumps(p.get("scope",{})),"rules_json":json.dumps(p.get("rules",{})),"created_at":p.get("created_at",now),"updated_at":now}); return pid
     def list_policies(self):
@@ -105,9 +142,21 @@ class ClickHouseRepository(Repository):
         bid=b.get("budget_id") or f"bud_{uuid.uuid4().hex[:12]}"; now=self.now_iso(); self._insert_json("budgets",{"budget_id":bid,"scope_type":b["scope_type"],"scope_value":b["scope_value"],"monthly_limit_usd":b["monthly_limit_usd"],"warning_threshold":b.get("warning_threshold",.8),"hard_limit":int(b.get("hard_limit",False)),"overage_action":b.get("overage_action","warn"),"created_at":b.get("created_at",now),"updated_at":now}); return bid
     def list_budgets(self): return [{**r,"hard_limit":bool(r["hard_limit"])} for r in self._query_json("SELECT * FROM budgets FINAL ORDER BY scope_type,scope_value")]
     def monthly_spend(self,scope_type,scope_value):
-        field={"team":"team","application":"application","workflow":"workflow"}[scope_type]; rows=self._query_json(f"SELECT sum(estimated_cost_usd) AS spend FROM ai_events WHERE {field}={self._quote(scope_value)} AND timestamp >= now()-INTERVAL 30 DAY"); return float(rows[0].get("spend") or 0) if rows else 0.0
+        query={
+            "team":"SELECT sum(estimated_cost_usd) AS spend FROM ai_events WHERE team={scope_value:String} AND timestamp >= now()-INTERVAL 30 DAY",
+            "application":"SELECT sum(estimated_cost_usd) AS spend FROM ai_events WHERE application={scope_value:String} AND timestamp >= now()-INTERVAL 30 DAY",
+            "workflow":"SELECT sum(estimated_cost_usd) AS spend FROM ai_events WHERE workflow={scope_value:String} AND timestamp >= now()-INTERVAL 30 DAY",
+        }[scope_type]
+        rows=self._query_json(query,{"scope_value":scope_value})
+        return float(rows[0].get("spend") or 0) if rows else 0.0
     def audit(self,kind,actor,subject,decision,details): self._insert_json("audit",{"audit_id":f"aud_{uuid.uuid4().hex[:12]}","timestamp":self.now_iso(),"kind":kind,"actor":actor,"subject":subject,"decision":decision,"details_json":json.dumps(details)})
-    def audits(self,limit=100): return [{**r,"details":json.loads(r["details_json"] or "{}")} for r in self._query_json(f"SELECT * FROM audit ORDER BY timestamp DESC LIMIT {int(limit)}")]
+    def audits(self,limit=100): return [
+        {**r,"details":json.loads(r["details_json"] or "{}")}
+        for r in self._query_json(
+            "SELECT * FROM audit ORDER BY timestamp DESC LIMIT {limit:UInt32}",
+            {"limit":int(limit)},
+        )
+    ]
     def clear_demo(self):
         for t in ("ai_events","workflows","replay_runs","policies","budgets","audit"): self._execute(f"TRUNCATE TABLE {t}")
 

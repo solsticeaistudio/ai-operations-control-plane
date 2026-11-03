@@ -89,7 +89,7 @@ The control plane attributes AI activity to people, apps, agents, and workflows;
 - Require controlled administrative policy changes and a fast, tested rollback.
 - Verify replay has no uncontrolled side effects; run representative quality and security evaluations before enforcement.
 
-## Suggested interview discussion
+## Design review questions
 
 1. **Why observe before enforce?** It lets teams quantify impacts and false positives before modifying real traffic.
 2. **Why keep policy enforcement outside the model?** An LLM response is untrusted; authorization must occur in a separate deterministic control.

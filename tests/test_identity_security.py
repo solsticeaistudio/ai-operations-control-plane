@@ -182,3 +182,138 @@ def test_secure_gateway_never_captures_raw_prompt_or_untrusted_identity(secure_a
     assert "CONFIDENTIAL_PROMPT_CANARY" not in serialized
     assert "CONFIDENTIAL_CONTEXT_CANARY" not in serialized
     assert "CONFIDENTIAL_METADATA_CANARY" not in serialized
+
+
+def test_secured_mode_hides_dev_ui_and_sensitive_health_info(secure_api):
+    client, token = secure_api
+    for path in ("/", "/docs", "/redoc", "/openapi.json", "/static/index.html"):
+        assert client.get(path).status_code == 404
+    assert client.get("/health").json() == {"ok": True}
+
+    response = client.get("/v1/events", headers=headers(token()))
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_query_limits_block_unbounded_result_requests(secure_api):
+    client, token = secure_api
+    h = headers(token())
+    assert client.get("/v1/events?limit=501", headers=h).status_code == 422
+    assert client.get("/v1/audit?limit=99999", headers=h).status_code == 422
+    assert client.get("/v1/replays?limit=201", headers=h).status_code == 422
+    assert client.get("/v1/events?hours=-1", headers=h).status_code == 422
+    assert client.get("/v1/events?limit=50", headers=h).status_code == 200
+
+
+def test_oversized_content_length_and_chunked_request_are_rejected(secure_api):
+    client, token = secure_api
+    h = headers(token())
+    payload = b'{"untrusted":"' + (b"x" * 270000) + b'"}'
+    oversized = client.post("/v1/events", headers=h, content=payload)
+    assert oversized.status_code == 413, oversized.text
+
+    # No explicit Content-Length: emulate a chunked upload, which must be
+    # interrupted during the receive stream, not buffered without a limit.
+    def chunks():
+        yield b'{"untrusted":"'
+        yield b"y" * 150000
+        yield b"z" * 150000
+        yield b'"}'
+
+    streamed = client.post("/v1/events", headers=h, content=chunks())
+    assert streamed.status_code == 413, streamed.text
+
+
+def test_secured_api_has_bounded_principal_and_source_rate_limits(secure_api, monkeypatch):
+    from app.limits import FixedWindowLimiter
+
+    client, token = secure_api
+    monkeypatch.setattr(main, "_principal_limiter", FixedWindowLimiter(limit=1))
+    h = headers(token())
+    assert client.get("/v1/events", headers=h).status_code == 200
+    limited = client.get("/v1/events", headers=h)
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) >= 1
+
+    monkeypatch.setattr(main, "_ip_limiter", FixedWindowLimiter(limit=1))
+    assert client.get("/v1/events").status_code == 401
+    unauth_limited = client.get("/v1/events")
+    assert unauth_limited.status_code == 429
+    assert int(unauth_limited.headers["retry-after"]) >= 1
+
+
+def test_untrusted_policy_claims_and_untrusted_audit_fields_are_not_authoritative(secure_api):
+    client, token = secure_api
+    h = headers(token())
+    response = client.post("/v1/events", headers=h, json={
+        "user_id": "admin", "workflow": "triage",
+        "provider": "mock", "model": "standard-model", "input_tokens": 80,
+        "policy_decision": "allow", "policy_reasons": ["CANARY_FAKE_POLICY_REASON"],
+        "error_code": "CANARY_FAKE_SECRET_ERROR",
+        "session_id": "CANARY_SESSION_SECRET",
+    })
+    assert response.status_code == 200, response.text
+    event = client.get("/v1/events", headers=h).json()[0]
+    assert event["policy_decision"] == "unverified"
+    assert event["policy_reasons"] == []
+    assert event["error_code"] == ""
+    assert event["session_id"] is None
+    assert client.get("/v1/analytics/overview", headers=h).json()["policy_events"] == 0
+
+    # An allowed gateway call stores no raw workflow/model identifiers in its
+    # operational audit entry. It may keep per-tenant usage event metadata.
+    result = client.post("/v1/gateway/generate", headers=h, json={
+        "user_id": "other", "team": "other", "application": "other",
+        "workflow": "CANARY_SECRET_WORKFLOW",
+        "prompt": "Private request", "model": "CANARY_SECRET_MODEL",
+        "provider": "mock",
+    })
+    assert result.status_code == 200, result.text
+
+    # Denied calls and admin changes use sanitized audit fields too.
+    assert client.post("/v1/policies", headers=h, json={
+        "name": "CANARY_SECRET_POLICY_NAME", "mode": "enforce",
+        "rules": {"allowed_providers": ["nonexistent-provider"]},
+    }).status_code == 200
+    denied = client.post("/v1/gateway/generate", headers=h, json={
+        "user_id": "other", "team": "other", "application": "other",
+        "workflow": "CANARY_SECRET_DENIED_WORKFLOW",
+        "prompt": "Private denied request", "model": "CANARY_SECRET_DENIED_MODEL",
+        "provider": "mock",
+    })
+    assert denied.status_code == 403
+
+    assert client.post("/v1/budgets", headers=h, json={
+        "scope_type": "application", "scope_value": "CANARY_SECRET_SCOPE",
+        "monthly_limit_usd": 25,
+    }).status_code == 200
+    audits = client.get("/v1/audit", headers=h).json()
+    serialized = json.dumps(audits)
+    for marker in (
+        "CANARY_SECRET_WORKFLOW", "CANARY_SECRET_MODEL",
+        "CANARY_SECRET_DENIED_WORKFLOW", "CANARY_SECRET_DENIED_MODEL",
+        "CANARY_SECRET_POLICY_NAME", "CANARY_SECRET_SCOPE",
+        "CANARY_FAKE_SECRET_ERROR", "CANARY_FAKE_POLICY_REASON",
+        "CANARY_SESSION_SECRET",
+    ):
+        assert marker not in serialized, marker
+
+
+def test_malformed_and_excessive_numeric_inputs_are_rejected(secure_api):
+    client, token = secure_api
+    h = headers(token())
+    assert client.post("/v1/events", headers=h, json={
+        "model": "standard-model", "input_tokens": -1,
+    }).status_code == 422
+    assert client.post("/v1/events", headers=h, json={
+        "model": "standard-model", "input_tokens": 10000001,
+    }).status_code == 422
+    assert client.post("/v1/gateway/generate", headers=h, json={
+        "user_id": "u", "team": "t", "application": "a",
+        "workflow": "w", "prompt": "hello", "max_output_tokens": 9999999,
+    }).status_code == 422
+    assert client.post("/v1/budgets", headers=h, json={
+        "scope_type": "team", "scope_value": "x", "monthly_limit_usd": -5,
+    }).status_code == 422

@@ -35,6 +35,19 @@ See [IDENTITY_HARDENING.md](IDENTITY_HARDENING.md) for configuration, threat
 boundaries and remaining limitations. Local demo mode is still unauthenticated
 unless `AIOPS_API_KEY` is configured and must not be exposed publicly.
 
+## M3 request and audit hardening
+
+Secure mode also limits the volume and size of API requests, bounds query
+results and untrusted numeric values, and reduces audit records to operational
+metadata. SDK telemetry cannot forge an authoritative policy decision.
+The local Docker Compose demo binds API/ClickHouse ports to loopback, and the API
+container runs under an unprivileged UID. Documentation and the static demo UI
+are hidden in secured mode.
+
+See [API_SECURITY_HARDENING.md](API_SECURITY_HARDENING.md) for settings, test
+coverage and limitations. Process-local throttling does not replace ingress
+quotas, source attestation, or data retention controls.
+
 ## Production identity design
 
 Do **not** trust `user_id`, `team` or application identity supplied by arbitrary clients in production. The opt-in secure path now overrides them using broker-verified claims. Put the service behind the enterprise identity-aware gateway and derive identity from signed authentication context. Workload identity should be distinct from human identity. The event should carry both the initiating principal and executing workload.

@@ -67,6 +67,22 @@ tenant access, authorization, oversized content-length and chunked bodies,
 request rate limits, query caps, malformed numeric inputs, audit canaries,
 local-only demo ports and non-root image configuration.
 
+## Secure development and SQL query hardening (M3.1)
+
+- GitHub Actions runs `pip-audit` on the explicitly pinned direct Python
+  dependencies and Bandit on the application, failing the PR on medium/high
+  findings. Treat this as an automated baseline, not a complete supply-chain
+  audit of all transitive dependencies or a substitute for code review.
+- ClickHouse queries that consume workflow IDs, time windows, limits, and
+  billing scopes use **typed query placeholders** with separate
+  `param_*` HTTP arguments instead of manual quote escaping.
+- SQLite identifiers are selected only from static known query strings,
+  while values use DB-API bound parameters.
+- SQL tests include an injection-shaped workflow identifier and assert it
+  does **not** appear inside the SQL string sent to ClickHouse.
+- A deployed ClickHouse integration test and a database account with restricted
+  DDL/query privileges remain production requirements.
+
 ## Next enterprise requirements
 
 1. Real customer federation, tenant onboarding and revocation.

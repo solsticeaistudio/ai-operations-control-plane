@@ -47,6 +47,28 @@ Tokens must be issued by a trusted enterprise identity broker with these signed 
 
 Authorization is enforced at each route after token verification. Read-only access does not grant policy mutation or audit access.
 
+## Calling the secured API
+
+Obtain a signed, appropriately scoped bearer token from your organization's
+trusted identity broker. The Python SDK accepts an already-issued token or a
+callback that retrieves a refreshed token:
+
+```python
+from solstice_aiops import AIopsClient
+
+# `fetch_short_lived_token` is your own identity-provider integration.
+ops = AIopsClient(
+    "https://your-aiops-service.example",
+    token_provider=fetch_short_lived_token,
+)
+ops.emit(workflow="ticket-triage", provider="mock", model="standard-model")
+ops.close()
+```
+
+The SDK does not generate or mint identity tokens, and no credentials should be
+embedded in the repository. The static dashboard still needs an OIDC login
+integration before it can access authenticated endpoints.
+
 ## Tenant data boundary
 
 Authenticated tenant identity selects a **separate physical backend namespace**:
@@ -77,6 +99,7 @@ A token issued for tenant B cannot query tenant A's repository through the API, 
 - Identity spoofing through user-supplied event fields; untrusted metadata removed
 - Gateway request captures and remote providers denied under secure defaults
 - Demo-seed disabled
+- SDK bearer token propagation and per-call token refresh callback
 
 Run `python -m pytest -q` or inspect the GitHub Actions PR check.
 

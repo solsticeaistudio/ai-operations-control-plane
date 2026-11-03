@@ -10,7 +10,18 @@ This repository is a product prototype, so it deliberately separates what is imp
 - Observe, shadow and enforce policy modes.
 - Budget-triggered warn/downgrade/deny behavior.
 - Central audit trail for gateway, replay and policy activity.
+- Denied-request and policy-change audit records use selected operational fields instead of copying prompts, context, request metadata, or arbitrary policy rules/scopes.
 - Model credentials remain in provider adapters/server-side configuration; model prompts do not receive provider keys.
+
+## Important remaining data exposure risks
+
+The audit fix does **not** make the entire prototype safe for sensitive production traffic:
+- Workflow captures persist raw prompts and context and are accessible through workflow endpoints.
+- Ingested AI events accept arbitrary client-supplied metadata.
+- Some human-readable audit identifiers and reasons remain client-derived.
+- Identity and classification attributes are currently self-asserted, and cross-tenant authorization is not implemented.
+
+See [THREAT_MODEL.md](THREAT_MODEL.md) for trust boundaries and enterprise security gates.
 
 ## Production identity design
 

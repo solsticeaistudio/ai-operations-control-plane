@@ -65,7 +65,14 @@ def generate(req: GatewayRequest):
     ctx=req.model_dump() | {"estimated_input_tokens":estimated_input}
     p=policy_engine.evaluate(ctx)
     if p["decision"]=="deny":
-        repo.audit("policy","gateway",req.workflow,"deny",{"reasons":p["reasons"],"request":ctx})
+        # Allowlist audit fields: prompt, context, metadata and other request bodies
+        # must never be written to the operational audit trail.
+        repo.audit("policy","gateway",req.workflow,"deny",{
+            "reasons":p["reasons"],
+            "provider":req.provider,
+            "model":req.model,
+            "data_classification":req.data_classification,
+        })
         raise HTTPException(403,{"message":"Request denied by policy","reasons":p["reasons"]})
     selected=p.get("route_model") or req.model
     adapter=providers.get(req.provider)
@@ -112,7 +119,16 @@ def replays(limit:int=100): return repo.replay_runs(limit)
 
 @app.post("/v1/policies")
 def create_policy(p:PolicyCreate):
-    pid=repo.upsert_policy(p.model_dump()); repo.audit("policy","operator",pid,"upsert",p.model_dump()); return {"ok":True,"policy_id":pid}
+    pid=repo.upsert_policy(p.model_dump())
+    # Do not duplicate arbitrary policy rules/scopes in audit records. They can
+    # contain customer identifiers or other configuration details.
+    repo.audit("policy","operator",pid,"upsert",{
+        "name":p.name,
+        "mode":p.mode,
+        "priority":p.priority,
+        "enabled":p.enabled,
+    })
+    return {"ok":True,"policy_id":pid}
 @app.get("/v1/policies")
 def policies(): return repo.list_policies()
 @app.post("/v1/budgets")

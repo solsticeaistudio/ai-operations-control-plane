@@ -23,9 +23,21 @@ The audit fix does **not** make the entire prototype safe for sensitive producti
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for trust boundaries and enterprise security gates.
 
+## M2 secure API mode
+
+Opt-in `AIOPS_SECURE_MODE=true` verifies OIDC bearer JWTs with the configured
+HTTPS JWKS, issuer, audience and expiry, and binds each request to the verified
+tenant's separate storage namespace. Per-route scopes limit ingest, read,
+execution, replay inspection, audit inspection and administration. Secure mode
+disables active replay and raw workflow capture, and blocks demo seeding.
+
+See [IDENTITY_HARDENING.md](IDENTITY_HARDENING.md) for configuration, threat
+boundaries and remaining limitations. Local demo mode is still unauthenticated
+unless `AIOPS_API_KEY` is configured and must not be exposed publicly.
+
 ## Production identity design
 
-Do **not** trust `user_id`, `team` or application identity supplied by arbitrary clients in production. Put the service behind the enterprise identity-aware gateway and derive identity from signed authentication context. Workload identity should be distinct from human identity. The event should carry both the initiating principal and executing workload.
+Do **not** trust `user_id`, `team` or application identity supplied by arbitrary clients in production. The opt-in secure path now overrides them using broker-verified claims. Put the service behind the enterprise identity-aware gateway and derive identity from signed authentication context. Workload identity should be distinct from human identity. The event should carry both the initiating principal and executing workload.
 
 Recommended shape:
 

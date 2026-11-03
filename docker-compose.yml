@@ -1,3 +1,5 @@
+# Local developer demo ONLY: services bind to loopback, not public interfaces.
+# Do not expose this compose configuration to the Internet or use it for production.
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -5,8 +7,8 @@ services:
       CLICKHOUSE_DB: aiops
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
     healthcheck:
@@ -24,7 +26,7 @@ services:
       ALLOW_STORAGE_FALLBACK: "false"
       AIOPS_DEMO_MODE: "true"
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       clickhouse:
         condition: service_healthy

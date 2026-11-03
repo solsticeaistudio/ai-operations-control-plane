@@ -203,6 +203,11 @@ def generate(req: GatewayRequest, request: Request):
     s = services_for(request, "aiops:execute")
     if settings.secure_mode:
         principal: Principal = request.state.principal
+        approved = {
+            v.strip() for v in settings.secure_allowed_providers.split(",") if v.strip()
+        }
+        if req.provider not in approved:
+            raise HTTPException(403, "Provider is not approved for secure mode")
         req = req.model_copy(update={
             "user_id": principal.subject,
             "team": principal.team,

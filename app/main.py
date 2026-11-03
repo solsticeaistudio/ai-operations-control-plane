@@ -208,6 +208,9 @@ def generate(req: GatewayRequest, request: Request):
         }
         if req.provider not in approved:
             raise HTTPException(403, "Provider is not approved for secure mode")
+        if (req.provider == "openai_compatible" and
+                not settings.openai_compat_base_url.startswith("https://")):
+            raise HTTPException(403, "Remote provider must use HTTPS in secure mode")
         req = req.model_copy(update={
             "user_id": principal.subject,
             "team": principal.team,

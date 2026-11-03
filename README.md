@@ -233,12 +233,34 @@ This repository is not a set of mock screenshots. The following pieces are imple
 | Python SDK | Working |
 | Browser dashboard | Working |
 | OpenAI-compatible provider adapter | Implemented |
-| Production SSO / enterprise identity | Not yet integrated |
+| OIDC JWT verification with scoped API routes | Implemented (opt-in secure mode) |
+| Tenant-specific SQLite/ClickHouse repositories | Implemented (prototype secure mode) |
+| Production customer federation / IdP onboarding | Not yet integrated |
 | Production-grade evaluation suite | Not yet implemented |
 
 Automated tests cover API behavior, policy evaluation, replay, economics, and audit-data redaction. See the GitHub Actions test workflow for the current test result.
 
 ---
+
+## Security modes
+
+The quick start below runs in **local demo mode**. It is not suitable for Internet
+exposure or for storing sensitive production data.
+
+An **opt-in secured API mode** is now available: `AIOPS_SECURE_MODE=true` validates
+RS256 JWTs against an administrator-configured HTTPS OIDC JWKS, checks issuer,
+audience, expiration and per-route scopes, derives trusted user/team/application
+identity, and selects a separate tenant database namespace.
+
+Secure mode also disables demo seeding, raw workflow captures and active replay,
+and only permits explicitly allowed model providers (mock by default). It is
+**not yet full enterprise SSO or production-ready isolation**: your organization
+must supply a trusted broker that securely maps users/workloads to tenants,
+and enforce DB-level permissions, retention, quotas and lifecycle controls.
+
+See [IDENTITY_HARDENING.md](IDENTITY_HARDENING.md) for required environment
+settings, API scopes, tests, and limitations. The static dashboard still lacks
+an OIDC login UI, so secured mode is primarily for API clients.
 
 ## Quick start
 
@@ -477,6 +499,7 @@ Additional documentation:
 - [`PRODUCTION_ROADMAP.md`](PRODUCTION_ROADMAP.md)
 - [`DEMO_SCRIPT.md`](DEMO_SCRIPT.md)
 - [`THREAT_MODEL.md`](THREAT_MODEL.md)
+- [`IDENTITY_HARDENING.md`](IDENTITY_HARDENING.md)
 
 ---
 

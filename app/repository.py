@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Any
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-import json, sqlite3, uuid, httpx, urllib.parse
+import json, sqlite3, uuid, httpx, urllib.parse, hashlib, re
 
 class Repository:
     backend="base"
@@ -59,6 +59,8 @@ class SQLiteRepository(Repository):
 class ClickHouseRepository(Repository):
     backend="clickhouse"
     def __init__(self,url,database="aiops",user="default",password=""):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", database):
+            raise ValueError("Invalid ClickHouse database identifier")
         self.url=url.rstrip("/"); self.database=database; self.auth=(user,password) if user else None; self.client=httpx.Client(timeout=15)
         # Bootstrap the database through the default namespace before querying it.
         self.client.post(self.url,params={"query":f"CREATE DATABASE IF NOT EXISTS {self.database}"},auth=self.auth).raise_for_status()
@@ -109,9 +111,38 @@ class ClickHouseRepository(Repository):
     def clear_demo(self):
         for t in ("ai_events","workflows","replay_runs","policies","budgets","audit"): self._execute(f"TRUNCATE TABLE {t}")
 
-def create_repository(settings):
-    if settings.storage=="clickhouse":
-        try: return ClickHouseRepository(settings.clickhouse_url,settings.clickhouse_database,settings.clickhouse_user,settings.clickhouse_password)
+def create_repository(settings, tenant_id: str | None = None):
+    """In secure mode use a separate physical storage namespace per trusted tenant.
+
+    This deliberately avoids relying on fragile application-only WHERE filters.
+    It is a prototype isolation boundary, not a replacement for least-privilege
+    database credentials, resource quotas or enterprise-level isolation.
+    """
+    if settings.secure_mode and not tenant_id:
+        raise RuntimeError("A trusted tenant is required in secure mode")
+    suffix = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()[:24] if tenant_id else None
+
+    if settings.storage == "clickhouse":
+        if settings.secure_mode and not settings.clickhouse_url.startswith("https://"):
+            raise RuntimeError("Secure mode requires TLS to ClickHouse")
+        db = settings.clickhouse_database
+        if suffix:
+            db = f"{db}_t_{suffix}"
+        try:
+            return ClickHouseRepository(
+                settings.clickhouse_url, db,
+                settings.clickhouse_user, settings.clickhouse_password,
+            )
         except Exception:
-            if not settings.allow_storage_fallback: raise
-    return SQLiteRepository(settings.sqlite_path)
+            # Never silently route a tenant's data to local SQLite if the
+            # intended authoritative ClickHouse store is unavailable.
+            if settings.secure_mode or not settings.allow_storage_fallback:
+                raise
+    elif settings.secure_mode and settings.storage != "sqlite":
+        raise RuntimeError("Unsupported storage backend in secure mode")
+
+    path = settings.sqlite_path
+    if suffix:
+        original = Path(path)
+        path = str(original.with_name(f"{original.stem}.t_{suffix}{original.suffix or '.db'}"))
+    return SQLiteRepository(path)

@@ -127,6 +127,10 @@ def trusted_event(event: AIEvent, request: Request) -> AIEvent:
         "agent": principal.application,
         "data_classification": "restricted",
         "metadata": {},
+        "session_id": None,
+        "error_code": "",
+        "policy_decision": "unverified",
+        "policy_reasons": [],
         "estimated_cost_usd": 0.0,
     })
 

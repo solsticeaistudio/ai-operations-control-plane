@@ -46,15 +46,12 @@ class FixedWindowLimiter:
             return 0
 
 
-class BodyTooLarge(Exception):
-    pass
-
-
 class BodySizeLimitMiddleware:
-    """Reject oversized /v1/ POST/PATCH/PUT bodies, including chunked requests.
+    """Bound the body before FastAPI JSON parsing, including chunked uploads.
 
-    The receive wrapper counts bytes *as the ASGI body is consumed*, so a large
-    chunked upload cannot force the application to buffer unlimited request data.
+    We buffer at most max_bytes of request body before forwarding the buffered
+    ASGI messages. Raising in a downstream receive() callback is insufficient:
+    FastAPI may convert body-parser exceptions into an unrelated 400 response.
     """
 
     def __init__(self, app, max_bytes: int, secure_mode):
@@ -69,7 +66,6 @@ class BodySizeLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Reject an over-limit Content-Length without reading the body.
         for name, value in scope.get("headers", []):
             if name.lower() == b"content-length":
                 try:
@@ -83,30 +79,33 @@ class BodySizeLimitMiddleware:
                     await self._reject(scope, receive, send, 413, "Request body too large")
                     return
 
+        buffered = []
         consumed = 0
-        response_started = False
-
-        async def limited_receive():
-            nonlocal consumed
+        while True:
             msg = await receive()
-            if msg["type"] == "http.request":
-                consumed += len(msg.get("body", b""))
-                if consumed > self.max_bytes:
-                    raise BodyTooLarge()
-            return msg
+            if msg["type"] == "http.disconnect":
+                return
+            if msg["type"] != "http.request":
+                continue
+            consumed += len(msg.get("body", b""))
+            if consumed > self.max_bytes:
+                await self._reject(scope, receive, send, 413, "Request body too large")
+                return
+            buffered.append(msg)
+            if not msg.get("more_body", False):
+                break
 
-        async def tracked_send(msg):
-            nonlocal response_started
-            if msg["type"] == "http.response.start":
-                response_started = True
-            await send(msg)
+        index = 0
 
-        try:
-            await self.app(scope, limited_receive, tracked_send)
-        except BodyTooLarge:
-            if response_started:
-                raise
-            await self._reject(scope, receive, send, 413, "Request body too large")
+        async def replay_receive():
+            nonlocal index
+            if index < len(buffered):
+                msg = buffered[index]
+                index += 1
+                return msg
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
 
     @staticmethod
     async def _reject(scope, receive, send, code: int, reason: str):

@@ -18,6 +18,7 @@ class Settings:
     oidc_issuer: str = os.getenv("AIOPS_OIDC_ISSUER", "")
     oidc_audience: str = os.getenv("AIOPS_OIDC_AUDIENCE", "")
     oidc_jwks_url: str = os.getenv("AIOPS_OIDC_JWKS_URL", "")
+    secure_allowed_providers: str = os.getenv("AIOPS_SECURE_ALLOWED_PROVIDERS", "mock")
     pricing_file: str = os.getenv("AIOPS_PRICING_FILE", str(Path(__file__).resolve().parents[1] / "config" / "pricing.json"))
     openai_compat_base_url: str = os.getenv("OPENAI_COMPAT_BASE_URL", "")
     openai_compat_api_key: str = os.getenv("OPENAI_COMPAT_API_KEY", "")
